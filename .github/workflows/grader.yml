@@ -1,0 +1,225 @@
+name: Grader
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # ── Métrica: e2e_test_presence ─────────────────────────────────────────
+      - name: Check E2E test files exist
+        id: test_presence
+        run: |
+          SPEC_COUNT=0
+          if [ -d "tests/e2e" ]; then
+            SPEC_COUNT=$(find tests/e2e -name "*.spec.ts" -o -name "*.spec.js" | wc -l | tr -d ' ')
+          elif [ -d "e2e" ]; then
+            SPEC_COUNT=$(find e2e -name "*.spec.ts" -o -name "*.spec.js" | wc -l | tr -d ' ')
+          fi
+
+          echo "spec_count=$SPEC_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$SPEC_COUNT" -gt 0 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Found $SPEC_COUNT E2E spec file(s)"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No E2E spec files found in tests/e2e/ or e2e/"
+          fi
+
+      # ── Métrica: test_pyramid_ratio ────────────────────────────────────────
+      - name: Check test pyramid ratio
+        id: pyramid_ratio
+        run: |
+          E2E_COUNT=0
+          if [ -d "tests/e2e" ]; then
+            E2E_COUNT=$(find tests/e2e \( -name "*.spec.ts" -o -name "*.spec.js" \) | wc -l | tr -d ' ')
+          elif [ -d "e2e" ]; then
+            E2E_COUNT=$(find e2e \( -name "*.spec.ts" -o -name "*.spec.js" \) | wc -l | tr -d ' ')
+          fi
+
+          TOTAL_COUNT=$(find . \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" \
+            -not -path "./app/node_modules/*" \
+            \( -name "*.spec.ts" -o -name "*.spec.js" -o -name "*.test.ts" -o -name "*.test.js" \) \
+            | wc -l | tr -d ' ')
+
+          echo "e2e_count=$E2E_COUNT" >> "$GITHUB_OUTPUT"
+          echo "total_count=$TOTAL_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$TOTAL_COUNT" -eq 0 ]; then
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No test files found"
+            exit 0
+          fi
+
+          RATIO=$(echo "scale=2; $E2E_COUNT / $TOTAL_COUNT" | bc)
+          PASSED=$([ "$(echo "$RATIO >= 0.6" | bc)" -eq 1 ] && echo "true" || echo "false")
+          echo "ratio=$RATIO" >> "$GITHUB_OUTPUT"
+          echo "score=$RATIO" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+          echo "E2E: $E2E_COUNT / Total: $TOTAL_COUNT = Ratio: $RATIO (threshold ≥ 0.6)"
+
+      # ── Métrica: test_pass_rate ────────────────────────────────────────────
+      - name: Install dependencies
+        if: steps.test_presence.outputs.passed == 'true'
+        run: |
+          npm install
+          cd app && npm install && cd ..
+          npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        id: test_run
+        if: steps.test_presence.outputs.passed == 'true'
+        run: |
+          set +e
+          npx playwright test 2>&1
+          EXIT_CODE=$?
+          set -e
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ All Playwright tests passed"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Some Playwright tests failed"
+          fi
+
+      - name: Skip test run (no spec files found)
+        id: test_run_skip
+        if: steps.test_presence.outputs.passed != 'true'
+        run: |
+          echo "score=0.0" >> "$GITHUB_OUTPUT"
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+          echo "⏭ Skipped: no E2E spec files to run"
+
+      - name: Upload Playwright report
+        if: steps.test_presence.outputs.passed == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
+
+      # ── Métrica: ci_pipeline_passes ────────────────────────────────────────
+      - name: Check student CI pipeline status
+        id: ci_passes
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          CHECKS=$(gh api \
+            "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name != "grade")] | { total: length, passing: [.[] | select(.conclusion == "success")] | length }' \
+            2>/dev/null || echo '{"total":0,"passing":0}')
+
+          TOTAL=$(echo "$CHECKS" | node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).total)")
+          PASSING=$(echo "$CHECKS" | node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).passing)")
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "score=null" >> "$GITHUB_OUTPUT"
+            echo "passed=null" >> "$GITHUB_OUTPUT"
+            echo "unavailable=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️  No CI check runs found yet"
+          elif [ "$TOTAL" -eq "$PASSING" ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "unavailable=false" >> "$GITHUB_OUTPUT"
+            echo "✅ All $TOTAL CI checks pass"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "unavailable=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $PASSING/$TOTAL CI checks pass"
+          fi
+
+      # ── Reporte final ──────────────────────────────────────────────────────
+      - name: Build grader report
+        run: |
+          PRESENCE_SCORE="${{ steps.test_presence.outputs.score }}"
+          PRESENCE_PASSED="${{ steps.test_presence.outputs.passed }}"
+
+          if [ "${{ steps.test_presence.outputs.passed }}" == "true" ]; then
+            RUN_SCORE="${{ steps.test_run.outputs.score }}"
+            RUN_PASSED="${{ steps.test_run.outputs.passed }}"
+          else
+            RUN_SCORE="${{ steps.test_run_skip.outputs.score }}"
+            RUN_PASSED="${{ steps.test_run_skip.outputs.passed }}"
+          fi
+
+          PYRAMID_SCORE="${{ steps.pyramid_ratio.outputs.score }}"
+          PYRAMID_PASSED="${{ steps.pyramid_ratio.outputs.passed }}"
+
+          CI_SCORE="${{ steps.ci_passes.outputs.score }}"
+          CI_PASSED="${{ steps.ci_passes.outputs.passed }}"
+          CI_UNAVAILABLE="${{ steps.ci_passes.outputs.unavailable }}"
+
+          [ -z "$CI_SCORE" ]       && CI_SCORE="null"
+          [ -z "$CI_PASSED" ]      && CI_PASSED="null"
+          [ -z "$CI_UNAVAILABLE" ] && CI_UNAVAILABLE="true"
+
+          cat > grader-report.json << EOF
+          {
+            "schemaVersion": "1.0",
+            "templateSlug": "gpi-e2e-playwright",
+            "runId": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}",
+            "metrics": [
+              {
+                "metricKey": "e2e_test_presence",
+                "score": $PRESENCE_SCORE,
+                "passed": $PRESENCE_PASSED,
+                "unavailable": false
+              },
+              {
+                "metricKey": "test_pass_rate",
+                "score": $RUN_SCORE,
+                "passed": $RUN_PASSED,
+                "unavailable": false
+              },
+              {
+                "metricKey": "test_pyramid_ratio",
+                "score": $PYRAMID_SCORE,
+                "passed": $PYRAMID_PASSED,
+                "unavailable": false
+              },
+              {
+                "metricKey": "ci_pipeline_passes",
+                "score": $CI_SCORE,
+                "passed": $CI_PASSED,
+                "unavailable": $CI_UNAVAILABLE
+              }
+            ]
+          }
+          EOF
+          cat grader-report.json
+
+      - name: Upload grader report
+        uses: actions/upload-artifact@v4
+        with:
+          name: grader-report
+          path: grader-report.json

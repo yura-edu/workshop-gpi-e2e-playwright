@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# TODO: Reemplaza el job "placeholder" con un job "e2e" que:
+#   1. Haga checkout del código
+#   2. Configure Node.js 20 con actions/setup-node@v4
+#   3. Instale dependencias: npm install && cd app && npm install && cd ..
+#   4. Instale el browser: npx playwright install --with-deps chromium
+#   5. Ejecute los tests: npx playwright test
+#   6. Publique el reporte HTML con actions/upload-artifact@v4
+#      (path: playwright-report/, siempre — incluso si los tests fallan)
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder — reemplaza este job con la ejecución de Playwright
+        run: echo "Implementa el pipeline de Playwright aquí"
